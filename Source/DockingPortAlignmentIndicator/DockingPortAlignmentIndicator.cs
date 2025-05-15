@@ -117,8 +117,6 @@ namespace NavyFish
         private static bool useCDI = true;
         private static bool drawRollDigits = true;
         private static bool showIndicator;
-        private static bool portWasCycled = false;
-        private static bool currentTargetVesselWasLastSeenLoaded = false;
         public static bool gaugeVisiblityToggledOn = false;
         private static bool targetOutOfRange = false;
         private static bool allowAutoPortTargeting = true;
@@ -137,16 +135,12 @@ namespace NavyFish
 
         static List<ITargetable> dockingModulesList = new List<ITargetable>();
         static int dockingModulesListIndex = -1;
-        
-        static ITargetable currentTarget = null;
-        static ITargetable lastTarget = null;
+
+        static Vessel currentActiveVessel = null;
         static Vessel currentTargetVessel = null;
-        static Vessel lastTargetVessel = null;
-        static Vessel lastActiveVessel = null;
-        static int cycledModuleIndex = -1;
+        static ITargetable currentTarget = null;
         static bool showHUDIconWhileIva = false;
         static bool wasLastIVA = false;
-        static bool wasLastMap = false;
 
         public static List<PartModule> referencePoints = new List<PartModule>();
         public static Part referencePart;
@@ -155,49 +149,19 @@ namespace NavyFish
         public static ModuleDockingNodeNamed referencePartNamed;
 
         static ITargetable targetedDockingModule = null;
-
-        private static ITargetable lastITargetable = null;
-        public static ModuleDockingNodeNamed lastNamedNode = null;
-
-        public static ModuleDockingNodeNamed targetNamedModule
+        static ITargetable TargetedDockingModule
         {
-            get
+            get { return targetedDockingModule; }
+            set
             {
-                if (targetedDockingModule == null) return null;
-                if (!(targetedDockingModule is PartModule)) return null;
-
-                if(targetedDockingModule == lastITargetable) return lastNamedNode;
-
-                lastITargetable = targetedDockingModule;
-
-                List<ModuleDockingNodeNamed> modules = (targetedDockingModule as PartModule).part.FindModulesImplementing<ModuleDockingNodeNamed>();
-                if (modules.Count > 0)
-                {
-                    if (targetedDockingModule is ModuleDockingNode && modules.Count > 1)
-                    {
-                        foreach (ModuleDockingNodeNamed namedModule in modules)
-                        {
-                            if (namedModule.controlTransformName.Equals((targetedDockingModule as ModuleDockingNode).controlTransformName))
-                            {
-                                lastNamedNode = namedModule;
-                                return namedModule;
-                            }
-                        }
-                    }
-                    lastNamedNode = modules[0];
-                    return modules[0];
-                }
+                targetedDockingModule = value;
+                if(targetedDockingModule == null)
+                    targetedDockingModuleNamed = null;
                 else
-                {
-                    return null;
-                }   
+                    targetedDockingModuleNamed = (targetedDockingModule as PartModule).part.FindModuleImplementing<ModuleDockingNodeNamed>();
             }
         }
-
-        private static bool isOrientedTarget (ITargetable target)
-        {
-            return target.GetTargetingMode() == VesselTargetModes.DirectionVelocityAndOrientation;
-        }
+        static ModuleDockingNodeNamed targetedDockingModuleNamed = null;
 
         /// <summary>
         /// Adds the toolbar button from the Stock toolbar (AppLauncher)
@@ -270,6 +234,8 @@ namespace NavyFish
         {
             Log($"Awake (GameScene=={HighLogic.LoadedScene}, appLauncherButton=={appLauncherButton})");
             loadTextures();
+
+            DockingFunctionsHelper.Initialize();
         }
         
         /// <summary>
@@ -408,44 +374,84 @@ namespace NavyFish
             //        portWasCycled = true;
             //}
 
-            //determineTargetPort();
-
             bool sceneElligibleForIndicator = (HighLogic.LoadedSceneIsFlight && !FlightGlobals.ActiveVessel.isEVA && !MapView.MapIsEnabled);
 
             //print("DPAI_DEBUG sceneElligble:" + sceneElligibleForIndicator);
             //print("DPAI_DEBUG guageVisibility" + gaugeVisiblityToggledOn);
 
-            if (sceneElligibleForIndicator && gaugeVisiblityToggledOn)
-            {
-                showIndicator = true;
+            showIndicator = (sceneElligibleForIndicator && gaugeVisiblityToggledOn);
 
-   
+            bool _isIVA = isIVA();
 
-                //mousePos.Set(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
-                //print(mousePos);
-                //if (windowPosition.Contains(mousePos))
-                //{
-                //    //print("Contains Mouse");
-                //    containsMouse = true;
-                //    //InputLockManager.SetControlLock(ControlTypes.All, "DPAI_LOCK");
-                //}
-                //else
-                //{
-                //    containsMouse = false;
-                //    //InputLockManager.RemoveControlLock("DPAI_LOCK");
-                //}
-            }
-            else
+            if (showIndicator || (RPMPageActive && _isIVA))
             {
-                showIndicator = false;
-                
-            }
+                if (currentActiveVessel != FlightGlobals.ActiveVessel)
+                    onVesselChanged();
+                else if (referencePart != currentActiveVessel.GetReferenceTransformPart())
+                {
+                    if(wasLastIVA != _isIVA)
+                    {
+                        FlightGlobals.ActiveVessel.SetReferenceTransform(referencePart);
+                        goto skip; // do nothing, we restart in next frame
+                    }
 
-            if (showIndicator || (RPMPageActive && isIVA()))
-            {
-                determineTargetPort();
-                if (targetedDockingModule != null) calculateGaugeData();
+                    onReferenceChanged();
+                }
+                else if((currentTarget != FlightGlobals.fetch.VesselTarget) || resetTarget)
+                    onTargetChanged();
+
+                if (TargetedDockingModule != null)
+                    calculateGaugeData();
                 drawIndicatorContentsToTexture();
+            }
+
+        skip:
+            wasLastIVA = _isIVA;
+        }
+
+        public static void onVesselChanged()
+        {
+            currentActiveVessel = FlightGlobals.ActiveVessel;
+
+            referencePoints.Clear();
+
+            if(currentActiveVessel)
+                findReferencePoints();
+
+            onReferenceChanged();
+        }
+        
+        public static void onReferenceChanged()
+        {
+            referencePart = null;
+            referencePartNamed = null;
+
+            if(currentActiveVessel)
+            {
+                determineReferencePoint();
+                referencePartIndex = referencePoints.FindIndex(m => m.part.Equals(referencePart));
+            }
+
+            onTargetChanged();
+        }
+        
+        public static void onTargetChanged()
+        {
+            resetTarget = false;
+            currentTarget = null;
+
+            if(currentActiveVessel)
+            {
+                currentTarget = FlightGlobals.fetch.VesselTarget;
+                currentTargetVessel = (currentTarget != null) ? currentTarget.GetVessel() : null;
+
+                findTargetPorts();
+
+                dockingModulesListIndex = dockingModulesList.FindIndex(m => m.Equals(currentTarget));
+                TargetedDockingModule = (dockingModulesListIndex >= 0) ? currentTarget : null;
+
+                if(allowAutoPortTargeting && (dockingModulesListIndex < 0) && (dockingModulesList.Count > 0))
+                    determineClosestTargetPort();
             }
         }
 
@@ -456,6 +462,11 @@ namespace NavyFish
                 return InternalCamera.Instance.isActive;
             }
             else return false;
+        }
+
+        private static bool isOrientedTarget (ITargetable target)
+        {
+            return target.GetTargetingMode() == VesselTargetModes.DirectionVelocityAndOrientation;
         }
 
         /// <summary>
@@ -519,274 +530,161 @@ namespace NavyFish
             return compatible;
         }
 
-        public static int tickCount = 0;
-
-        private static void determineTargetPort()
+        private static void findReferencePoints()
         {
-            if (portWasCycled && dockingModulesList.Count > 1)
+            foreach (Part thatPart in currentActiveVessel.Parts)
             {
-                if (cycledModuleIndex < 0 || cycledModuleIndex > (dockingModulesList.Count - 1))
+                foreach (PartModule thatModule in thatPart.Modules)
                 {
-                    //protection from bug when target deselected amidst cycling, resulting in -1 index with portWasCycled == true
-                    //debugAlertFlag = true;
-                    //debugAlertValue = cycledModuleIndex;
-                    cycledModuleIndex = 0;
+                    var thatNode = thatModule as ModuleDockingNode;
+                    var thatCommand = thatModule as ModuleCommand;
+                    var thatClaw = thatModule as ModuleGrappleNode;
+                    if (thatNode != null || thatCommand != null || thatClaw != null)
+                    {
+                        referencePoints.Add(thatModule);
+                    }
                 }
-                dockingModulesListIndex = cycledModuleIndex;
-                targetedDockingModule = dockingModulesList[dockingModulesListIndex];
+            }
+        }
 
-                portWasCycled = false;
-                if (!targetedDockingModule.GetVessel().packed)
-                {
-                    FlightGlobals.fetch.SetVesselTarget(targetedDockingModule);
-                }
+        private static void determineReferencePoint()
+        {
+            referencePart = FlightGlobals.ActiveVessel.GetReferenceTransformPart();
+            referencePartNamed = referencePart ? referencePart.FindModuleImplementing<ModuleDockingNodeNamed>() : null;
+        }
+
+        private static void findTargetPorts()
+        {
+            dockingModulesList.Clear();
+
+            if(currentTargetVessel == null)
                 return;
-            }
 
-            if (lastActiveVessel != FlightGlobals.ActiveVessel || resetTarget)
+            List<ITargetable> ITargetableList = currentTargetVessel.FindPartModulesImplementing<ITargetable>();
+            foreach (ITargetable tgt in ITargetableList)
             {
-                //print("resetTarget");
-                resetTarget = false;
-                lastActiveVessel = FlightGlobals.ActiveVessel;
-                lastTarget = null;
-                lastTargetVessel = null;
-                currentTargetVesselWasLastSeenLoaded = false;
-                targetedDockingModule = null;
-                dockingModulesListIndex = -1;
-                portWasCycled = false;
-                dockingModulesList.Clear();
-                lastReferencePart = null;
-                findReferencePoints();
-                wasLastIVA = isIVA();
-                wasLastMap = MapView.MapIsEnabled;
-            }
-
-            determineReferencePoint();
-            tickCount++;
-
-            bool isInMap = MapView.MapIsEnabled;
-            bool justLeftMap = false;
-            if (!isInMap && wasLastMap)
-            {
-                justLeftMap = true;
-            }             
-            wasLastMap = isInMap;
-
-            bool isInIVA = isIVA();
-            bool justEnteredIVA = false;
-            if (isInIVA && !wasLastIVA)
-            {
-                justEnteredIVA = true;
-            }
-            wasLastIVA = isInIVA;
-
-            if (lastReferencePart != referencePart)
-            {
-                //print("DPAI: Reference Part Changed - tick " + tickCount);
-                bool isCurrentlyIVA = isIVA();
-                if (isCurrentlyIVA){
-                    //print("DPAI: Is currently IVA - tick " + tickCount);
-
-                    if(justEnteredIVA || justLeftMap){
-                        //print("DPAI: Was not previously IVA - tick " + tickCount);
-                        
-                        if (FlightGlobals.ActiveVessel.Parts.Contains(lastReferencePart))
-                        {
-                            FlightGlobals.ActiveVessel.SetReferenceTransform(lastReferencePart);
-                            //print("DPAI: Re-setting Reference Part - tick " + tickCount);
-                            findReferencePoints();
-                        }
-                    }
-                }
-                lastReferencePart = referencePart;
-                // Force recalculation of possible target ports if we're restricting them
-                if (restrictDockingPorts) {
-                    currentTargetVesselWasLastSeenLoaded = false;
-                }
-            }
-
-            currentTarget = FlightGlobals.fetch.VesselTarget;
-
-            if (currentTarget != null)
-            {
-                currentTargetVessel = currentTarget.GetVessel();
-
-                if (currentTargetVessel != null)
+                if (tgt is ModuleDockingNode)
                 {
-                    if (currentTargetVessel.loaded)
+                    ModuleDockingNode port = tgt as ModuleDockingNode;
+                    Log($"Adding Docking Port {port} (state={port.state}, other={port.otherNode}) to list of targets.");
+                    // MKW: if node was attached in the VAB, state is "PreAttached"
+                    if (excludeDockedPorts &&
+                            (port.state.StartsWith("Docked", StringComparison.OrdinalIgnoreCase) || 
+                            port.state.StartsWith("PreAttached", StringComparison.OrdinalIgnoreCase))
+                        )
                     {
-                        targetOutOfRange = false;
-
-                        if (currentTargetVessel != lastTargetVessel || !currentTargetVesselWasLastSeenLoaded)
-                        {
-                            //Target Vessel has either changed or just become loaded.
-
-                            lastTargetVessel = currentTargetVessel;
-
-                            if (allowAutoPortTargeting)
-                            {
-                                //dockingModulesList = currentTargetVessel.FindPartModulesImplementing<ModuleDockingNode>();
-                                //print("list rebuilt");
-                                List<ITargetable> ITargetableList = currentTargetVessel.FindPartModulesImplementing<ITargetable>();
-                                dockingModulesList.Clear();
-                                foreach (ITargetable tgt in ITargetableList)
-                                {
-                                    if (tgt is ModuleDockingNode)
-                                    {
-                                        ModuleDockingNode port = tgt as ModuleDockingNode;
-                                        Log($"Adding Docking Port {port} (state={port.state}, other={port.otherNode}) to list of targets.");
-                                        // MKW: if node was attached in the VAB, state is "PreAttached"
-                                        if (excludeDockedPorts &&
-                                                (port.state.StartsWith("Docked", StringComparison.OrdinalIgnoreCase) || 
-                                                port.state.StartsWith("PreAttached", StringComparison.OrdinalIgnoreCase))
-                                            )
-                                        {
-                                            //print("continue");
-                                            //do not add to list if module is already docked
-                                            continue;
-                                        }
-
-                                        if(restrictDockingPorts && !isCompatiblePort(port))
-                                        {
-                                          // Do not add to list if destination port doesn't match
-                                          continue;
-                                        }
-
-                                        //print("1stAdd");
-                                        dockingModulesList.Add(tgt);
-                                    }
-                                    else
-                                    {
-                                        //print("2ndAdd");
-                                        dockingModulesList.Add(tgt);
-                                    }
-                                }
-
-                                if (dockingModulesList.Count > 0)
-                                {
-                                    // If we already have a valid docking port as our current target, don't change it
-                                    int idx = dockingModulesList.IndexOf(targetedDockingModule);
-                                    dockingModulesListIndex = -1;
-                                    if (idx != -1)
-                                    {
-                                        dockingModulesListIndex = idx;
-                                        lastTarget = targetedDockingModule;
-                                    }
-                                    //if (currentTarget is ModuleDockingNode && !currentTargetVessel.packed)
-                                    else if ((currentTarget is ModuleDockingNode) && isOrientedTarget(currentTarget) && !currentTargetVessel.packed)
-                                    {
-                                        // Use the currently selected target (if it is a docking port)
-                                        //targetedDockingModule = currentTarget as ModuleDockingNode;
-                                        targetedDockingModule = currentTarget;
-                                        dockingModulesListIndex = dockingModulesList.FindIndex(m => m.Equals(targetedDockingModule));
-                                        if (dockingModulesListIndex == -1)
-                                        {
-                                            //Unneccessary?
-                                            //dockingModulesList.Add(targetedDockingModule);
-                                            //dockingModulesListIndex = dockingModulesList.FindIndex(m => m.Equals(targetedDockingModule));
-                                        }
-                                        lastTarget = targetedDockingModule;
-                                    }
-
-                                    if(dockingModulesListIndex == -1)
-                                    {
-                                        // Automatically select closest docking port.
-                                        float shortestDistance = float.MaxValue;
-                                        int shortestDistanceIndex = -1;
-                                        for (int i = 0; i < dockingModulesList.Count; i++)
-                                        {
-                                            //ModuleDockingNode port = dockingModulesList[i];
-                                            //float distance = Vector3.Distance(port.transform.position, FlightGlobals.ActiveVessel.ReferenceTransform.position);
-                                            ITargetable port = dockingModulesList[i];
-                                            float distance = Vector3.Distance(port.GetTransform().position, FlightGlobals.ActiveVessel.ReferenceTransform.position);
-                                            if (distance < shortestDistance)
-                                            {
-                                                shortestDistance = distance;
-                                                shortestDistanceIndex = i;
-                                            }
-                                        }
-
-                                        dockingModulesListIndex = shortestDistanceIndex;
-                                        targetedDockingModule = dockingModulesList[dockingModulesListIndex];
-                                        lastTarget = targetedDockingModule;
-                                    }
-                                }
-                                else
-                                {
-                                    // Target does not have any docking ports
-                                    targetedDockingModule = null;
-                                    dockingModulesListIndex = -1;
-                                    dockingModulesList.Clear();
-                                }
-                            }
-                            else
-                            {
-                                targetedDockingModule = null;
-                                dockingModulesListIndex = -1;
-                                dockingModulesList.Clear();
-                            }
-                        }
-                        else if (currentTarget != lastTarget)
-                        {
-                            lastTarget = currentTarget;
-
-                            //if (portWasCycled)
-                            //{
-                            //    portWasCycled = false;
-                            //}
-                            //else
-                            //{
-                                // This will happen either when the user manually selects a new target port by
-                                // right-clicking on it, OR when a targetable part is targeted beyond 200m
-                                // (because its parent vessel will be automatically re-targeted by KSP)
-                                //if (currentTarget is ModuleDockingNode)
-                                if (currentTarget is PartModule)
-                                {
-                                    // Likely caused by user right-click a port and setting as target
-                                    //targetedDockingModule = currentTarget as ModuleDockingNode;
-                                    targetedDockingModule = currentTarget;
-                                    dockingModulesListIndex = dockingModulesList.FindIndex(m => m.Equals(targetedDockingModule));
-                                }
-                            //}
-                        }
-
-                        currentTargetVesselWasLastSeenLoaded = true;
-
+                        //print("continue");
+                        //do not add to list if module is already docked
+                        continue;
                     }
-                    else
+
+                    if(restrictDockingPorts && !isCompatiblePort(port))
                     {
-                        if (currentTargetVesselWasLastSeenLoaded)
-                        {
-                            //Target just became unloaded
-                            currentTargetVesselWasLastSeenLoaded = false;
-                            FlightGlobals.fetch.SetVesselTarget(currentTargetVessel);
-                        }
-
-                        targetedDockingModule = null;
-                        dockingModulesListIndex = -1;
-                        dockingModulesList.Clear();
-
-                        targetOutOfRange = true;
-
+                        // Do not add to list if destination port doesn't match
+                        continue;
                     }
+
+                    //print("1stAdd");
+                    dockingModulesList.Add(tgt);
                 }
                 else
                 {
-                    //Current target does not have an associated vessel
-                    targetedDockingModule = null;
-                    dockingModulesListIndex = -1;
-                    dockingModulesList.Clear();
+                    PartModule pm = tgt as PartModule;
+
+                    if(restrictDockingPorts && pm && !DockingFunctionsHelper.IsReadyFor(pm.part, referencePart))
+                        continue;
+
+                    //print("2ndAdd");
+                    dockingModulesList.Add(tgt);
                 }
             }
-            else
+        }
+
+        private static void determineClosestTargetPort()
+        {
+            // Automatically select closest docking port.
+            float shortestDistance = float.MaxValue;
+
+            int shortestDistanceIndex = -1;
+            for (int i = 0; i < dockingModulesList.Count; i++)
             {
-                // Current Target is null
-                currentTargetVessel = null;
-                lastTarget = null;
-                lastTargetVessel = null;
-                targetedDockingModule = null;
-                dockingModulesListIndex = -1;
-                dockingModulesList.Clear();
+                ITargetable port = dockingModulesList[i];
+                float distance = Vector3.Distance(port.GetTransform().position, FlightGlobals.ActiveVessel.ReferenceTransform.position);
+                if (distance < shortestDistance)
+                {
+                shortestDistance = distance;
+                shortestDistanceIndex = i;
+                }
+            }
+
+            dockingModulesListIndex = shortestDistanceIndex;
+            TargetedDockingModule = dockingModulesList[dockingModulesListIndex];
+        }
+
+        public static void cycleReferencePoint(int direction)
+        {
+            if(referencePoints.Count == 0)
+                return;
+
+            int newIndex = referencePartIndex + direction;
+            if (newIndex < 0)
+            {
+                newIndex = referencePoints.Count - 1;
+            }
+            else if (newIndex >= referencePoints.Count)
+            {
+                newIndex = 0;
+            }
+
+            PartModule module = referencePoints[newIndex];
+
+            var node = module as ModuleDockingNode;
+            var pod = module as ModuleCommand;
+            var claw = module as ModuleGrappleNode;
+
+            //Thanks Mihara!
+            if (node != null)
+            {
+                node.MakeReferenceTransform();
+            } else if (pod != null)
+            {
+                pod.MakeReference();
+            } else if (claw != null)
+            {
+                claw.MakeReferenceTransform();
+            }
+
+            determineReferencePoint();
+            referencePartIndex = newIndex;
+        }
+
+        public static void cyclePortLeft()
+        {
+            if (dockingModulesList.Count == 0)
+                return;
+
+            dockingModulesListIndex = (dockingModulesListIndex > 0) ? (dockingModulesListIndex - 1) : (dockingModulesList.Count - 1);
+
+            TargetedDockingModule = dockingModulesList[dockingModulesListIndex];
+
+            if (!TargetedDockingModule.GetVessel().packed)
+            {
+                FlightGlobals.fetch.SetVesselTarget(TargetedDockingModule);
+            }
+        }
+
+        public static void cyclePortRight()
+        {
+            if (dockingModulesList.Count == 0)
+                return;
+
+            dockingModulesListIndex = (dockingModulesListIndex + 1) % dockingModulesList.Count;
+
+            TargetedDockingModule = dockingModulesList[dockingModulesListIndex];
+
+            if (!TargetedDockingModule.GetVessel().packed)
+            {
+                FlightGlobals.fetch.SetVesselTarget(TargetedDockingModule);
             }
         }
 
@@ -794,7 +692,7 @@ namespace NavyFish
         {
             Transform selfTransform = FlightGlobals.ActiveVessel.ReferenceTransform;
          
-            ITargetable targetPort = targetedDockingModule as ITargetable;
+            ITargetable targetPort = TargetedDockingModule as ITargetable;
 
             Transform targetTransform = targetPort.GetTransform();
 
@@ -1000,7 +898,7 @@ namespace NavyFish
 
             float baseScale = 1f;
 
-            if (targetedDockingModule != null)
+            if (TargetedDockingModule != null)
             {
                 if (useCDI)
                 {
@@ -1160,23 +1058,6 @@ namespace NavyFish
                 saveWindowPosition();
             }
 
-        }
-
-        public static void cyclePortLeft()
-        {
-            cycledModuleIndex = dockingModulesListIndex - 1;
-            if (cycledModuleIndex < 0) cycledModuleIndex = (dockingModulesList.Count - 1);
-            portWasCycled = true;
-        }
-
-        public static void cyclePortRight()
-        {
-            if (dockingModulesList.Count > 0)
-            {
-                cycledModuleIndex = dockingModulesListIndex + 1;
-                cycledModuleIndex %= dockingModulesList.Count;
-                portWasCycled = true;
-            }
         }
 
         private void drawSettingsWindowContents(int id)
@@ -1346,8 +1227,6 @@ namespace NavyFish
             drawGlyphStringGUI(targetDisplayName, x, y, textTargetRefNameScale, BitmapFont.HorizontalAlignment.LEFT);
         }
                 
-        //private static List<ModuleDockingNodeNamed> refNamedModules = new List<ModuleDockingNodeNamed>();
-
         public static string getReferencePortName()
         {
             if (referencePartNamed != null)
@@ -1357,6 +1236,11 @@ namespace NavyFish
             }
             else if (referencePart != null)
             {
+                ITargetable tgt = referencePart.FindModuleImplementing<ITargetable>();
+
+                if(tgt != null)
+                    return tgt.GetName();
+
                 //referenceName += referencePart.name;
                 return referencePart.name;
             }
@@ -1375,7 +1259,7 @@ namespace NavyFish
             {
                 targetDisplayName = "No Vessel Targeted";
             }
-            else if (targetedDockingModule == null)
+            else if (TargetedDockingModule == null)
             {
                 if (targetOutOfRange)
                 {
@@ -1386,13 +1270,14 @@ namespace NavyFish
                     targetDisplayName = "No Port Targeted";
                 }
             }
-            else if (targetNamedModule == null)
+            else if (targetedDockingModuleNamed == null)
             {
-                targetDisplayName = (targetedDockingModule as PartModule).part.partInfo.title;
+//              targetDisplayName = (targetedDockingModule as PartModule).part.partInfo.title;
+                targetDisplayName = TargetedDockingModule.GetName();
             }
             else
             {
-                targetDisplayName = targetNamedModule.portName;
+                targetDisplayName = targetedDockingModuleNamed.portName;
             }
             return targetDisplayName;
         }
@@ -1504,7 +1389,7 @@ namespace NavyFish
             // has already been destroyed but targetedDockingModule is not null and, being
             // an interface variable, does not use the Unity operator == overload.  So we
             // need to do a bit more to avoid a Null-reference exception.
-            var tdmTransform = targetedDockingModule?.GetTransform();
+            var tdmTransform = TargetedDockingModule?.GetTransform();
             // tdmTransform is an actual Unity object variable, so it uses the overloaded
             // Unity operator == and correctly detects a destroyed GameObject.
             if (tdmTransform == null) {
@@ -1552,105 +1437,6 @@ namespace NavyFish
             GUI.DrawTexture(selectedPortHUDRect, targetPort, ScaleMode.ScaleToFit, true);
             GUI.color = originalColor;
             //print("drawTargetPortIndicator: End");
-        }
-
-        public static void cycleReferencePoint(int direction)
-        {
-            if (referencePartIndex == -1)
-            {
-                findReferencePoints();
-            }
-
-            if (referencePartIndex == -1) return;
-
-            int newIndex = referencePartIndex + direction;
-            if (newIndex < 0)
-            {
-                newIndex = referencePoints.Count - 1;
-            }
-            else if (newIndex >= referencePoints.Count)
-            {
-                newIndex = 0;
-            }
-
-            if (newIndex != referencePartIndex)
-            {
-                PartModule module = referencePoints[newIndex];
-
-                var node = module as ModuleDockingNode;
-                var pod = module as ModuleCommand;
-                var claw = module as ModuleGrappleNode;
-
-                //Thanks Mihara!
-                if (node != null)
-                {
-                    node.MakeReferenceTransform();
-                } else if (pod != null)
-                {
-                    pod.MakeReference();
-                } else if (claw != null)
-                {
-                    claw.MakeReferenceTransform();
-                }
-
-
-                determineReferencePoint();
-                determineReferencePointIndex();
-            }
-        }
-
-        private static void findReferencePoints()
-        {
-            determineReferencePoint();
-
-            referencePoints.Clear();
-
-            foreach (Part thatPart in FlightGlobals.ActiveVessel.Parts)
-            {
-                foreach (PartModule thatModule in thatPart.Modules)
-                {
-                    var thatNode = thatModule as ModuleDockingNode;
-                    var thatCommand = thatModule as ModuleCommand;
-                    var thatClaw = thatModule as ModuleGrappleNode;
-                    if (thatNode != null || thatCommand != null || thatClaw != null)
-                    {
-                        referencePoints.Add(thatModule);
-                    }
-                }
-            }
-
-            determineReferencePointIndex();
-        }
-
-        private static void determineReferencePoint()
-        {
-            Part refPart = FlightGlobals.ActiveVessel.GetReferenceTransformPart();
-            if (refPart != null && refPart != referencePart)
-            {
-                referencePart = refPart;
-                referencePartNamed = null;
-                List<ModuleDockingNodeNamed> namedPorts = referencePart.FindModulesImplementing<ModuleDockingNodeNamed>();
-
-                if (namedPorts.Count > 0)
-                {
-                    referencePartNamed = namedPorts[0];
-                }
-            }
-        }
-
-        private static void determineReferencePointIndex()
-        {
-            referencePartIndex = -1;
-            int i=0;
-            foreach (PartModule m in referencePoints)
-            {
-                if (m.part.Equals(referencePart))
-                {
-                    referencePartIndex = i;
-                    break;
-                }
-                i++;
-            }
         }
 
         public static void clearRenameHighlightBoxRPM()

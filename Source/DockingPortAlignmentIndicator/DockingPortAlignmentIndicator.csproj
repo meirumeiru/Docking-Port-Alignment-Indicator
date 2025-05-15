@@ -51,6 +51,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="BitmapFont.cs" />
+    <Compile Include="DockingFunctionsHelper.cs" />
     <Compile Include="DockingPortAlignmentIndicator.cs" />
     <Compile Include="Drawing.cs" />
     <Compile Include="GlyphData.cs" />
